@@ -29,6 +29,10 @@ PLOTLY_CONFIG = {
 st.markdown(f"""<style>
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css');
 html, body, .stApp, [class*="st-"] {{ font-family:'Pretendard',-apple-system,sans-serif; }}
+/* 한글은 기본 줄바꿈 규칙상 한 단어 안에서도 음절 사이에서 줄이 끊길 수 있다("단순해지"/"다"처럼
+   보기 불편하게 잘림). word-break:keep-all로 단어(어절) 중간에서는 끊기지 않게 하고,
+   그래도 컨테이너보다 긴 단어가 있으면 overflow-wrap으로 넘치지 않게만 처리한다. */
+body, .stApp, [class*="st-"] {{ word-break:keep-all; overflow-wrap:break-word; }}
 #MainMenu, footer, header[data-testid="stHeader"] {{ visibility:hidden; height:0; }}
 .block-container {{ padding-top:0.6rem; max-width:1240px; }}
 
@@ -78,7 +82,8 @@ N_SCEN = len(preset_scenarios())
 
 st.markdown('<p class="h-title">정년연장이 우리 회사 인력구조에 미치는 영향</p>', unsafe_allow_html=True)
 st.markdown(f'<p class="h-sub">기업 조건을 입력하면 국회에서 경합 중인 {N_SCEN}개 정책 시나리오의 '
-            '10~15년 결과를 비교하고, 더 나은 대안이 있는 시나리오는 자동으로 걸러냅니다.</p>', unsafe_allow_html=True)
+            '10~15년 결과를 비교합니다.<br>이 중 다른 시나리오보다 나은 점이 하나도 없는 시나리오는 '
+            '자동으로 걸러내어, 실제로 검토할 만한 후보만 남겨드립니다.</p>', unsafe_allow_html=True)
 
 # ── 설정 (메인 영역, 가로 폼) ──
 with st.form("cfg"):
@@ -115,8 +120,9 @@ with st.form("cfg"):
                              format_func=lambda k: WAGE_REGIMES[k]["label"],
                              help="정년연장 비용을 좌우하는 핵심 가정입니다. 기본값(현재 추세 그대로)이 "
                                   "가장 현실적이고, 호봉제로 갈수록 비용이 크게 올라갑니다.")
-    r3[2].markdown(f'<div style="color:{SUB};font-size:.8rem;padding-top:26px;line-height:1.6">'
-                   f'{HIRING_POLICIES[hiring][1]}</div>', unsafe_allow_html=True)
+    hiring_desc = HIRING_POLICIES[hiring][1].replace(". ", ".<br>")
+    r3[2].markdown(f'<div style="color:{SUB};font-size:.8rem;padding-top:26px;line-height:1.7">'
+                   f'{hiring_desc}</div>', unsafe_allow_html=True)
     go_btn = st.form_submit_button("시나리오 분석")
 
 @st.cache_data(show_spinner=f"{N_SCEN}개 시나리오를 시뮬레이션하고 있습니다")
@@ -167,10 +173,13 @@ if "res" in st.session_state:
         col.metric(label, val, delta, delta_color="off")
 
     top = kpis[0][0].replace(" 차이", "")
-    st.markdown(f'<div style="color:{SUB};font-size:.86rem;margin:10px 2px 0">'
-                f'시나리오마다 가장 크게 벌어지는 것은 <b style="color:{INK}">{top}</b>입니다. '
-                f'인건비 차이는 {kpis[-1][2].lstrip("+")}로 크지 않습니다 — 정년연장의 부담은 '
-                f'인건비보다 채용 규모와 인력 나이 구성에서 먼저 드러납니다.</div>',
+    top_pct = kpis[0][2]
+    st.markdown(f'<div style="color:{SUB};font-size:.86rem;margin:10px 2px 0;line-height:1.8">'
+                f'시나리오마다 가장 크게 벌어지는 것은 <b style="color:{INK}">{top}</b>로, 시나리오 간 '
+                f'차이가 최대 {top_pct}에 달합니다.<br>'
+                f'반면 인건비 차이는 {kpis[-1][2].lstrip("+")}로 상대적으로 크지 않습니다 — 정년연장의 '
+                f'부담은 인건비보다 채용 규모와 인력 나이 구성에서 먼저, 더 크게 드러난다는 뜻입니다. '
+                f'예산 부담보다 채용 계획과 인력 재배치를 먼저 점검해보시길 권합니다.</div>',
                 unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4 = st.tabs(["시나리오 비교", "연도별 추이", "비용 vs 인력 비교", "조건이 달라지면?"])
@@ -207,8 +216,8 @@ if "res" in st.session_state:
                     f'<div><span class="chip-in">후보</span>&nbsp; 다른 안보다 나쁜 점이 없는 시나리오</div>'
                     f'<div><span class="chip-out">탈락</span>&nbsp; 더 나은 대안이 있어 제외된 시나리오</div>'
                     f'</div>', unsafe_allow_html=True)
-        st.markdown(f'<div style="color:#98A4AE;font-size:.78rem;margin-top:10px;line-height:1.6">'
-                    f'"90% 변동구간"은 같은 조건에서 시뮬레이션을 여러 번 돌렸을 때 생기는 계산상 오차 범위입니다. '
+        st.markdown(f'<div style="color:#98A4AE;font-size:.78rem;margin-top:10px;line-height:1.7">'
+                    f'"90% 변동구간"은 같은 조건에서 시뮬레이션을 여러 번 돌렸을 때 생기는 계산상 오차 범위입니다.<br>'
                     f'재고용 수락률처럼 회사마다 다른 조건은 <b>조건이 달라지면?</b> 탭에서 따로 확인하세요.</div>',
                     unsafe_allow_html=True)
 
@@ -256,16 +265,19 @@ if "res" in st.session_state:
         fig.update_xaxes(gridcolor=LINE)
         fig.update_yaxes(gridcolor=LINE)
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
-        st.markdown('<span style="color:#5D6B77;font-size:.85rem">큰 점 = 후보 시나리오. 왼쪽 아래로 '
-                    '갈수록 비용이 적고, 위로 갈수록 55세 이상 인력이 많이 남습니다. 어느 쪽을 '
-                    '우선할지는 회사의 선택입니다.</span>',
+        st.markdown('<span style="color:#5D6B77;font-size:.85rem;line-height:1.8">큰 점 = 후보 시나리오, '
+                    '작고 옅은 점 = 탈락한 시나리오입니다.<br>왼쪽 아래로 갈수록 비용이 적고, 위로 갈수록 '
+                    '55세 이상 인력이 많이 남습니다. 비용을 줄일지, 숙련 인력을 오래 남길지는 회사가 '
+                    '무엇을 더 중요하게 보는지에 따라 달라지는 선택입니다.</span>',
                     unsafe_allow_html=True)
 
     with tab4:
-        st.markdown(f'<div style="color:{SUB};font-size:.88rem;line-height:1.6">'
+        st.markdown(f'<div style="color:{SUB};font-size:.88rem;line-height:1.8">'
                     f'위 결과는 "재고용을 얼마나 받아들일지·재고용 시 임금을 얼마나 줄지"를 회사가 정확히 '
-                    f'모른 채 <b style="color:{INK}">추정값</b>으로 계산한 것입니다. 이 추정이 틀려도 추천 '
-                    f'후보가 그대로인지, 아래에서 미리 확인할 수 있습니다.</div>',
+                    f'모른 채 <b style="color:{INK}">추정값</b>으로 계산한 것입니다.<br>'
+                    f'이 추정이 실제와 다르더라도 지금의 추천 후보가 그대로 유지되는지, 아니면 다른 후보로 '
+                    f'바뀌는지를 아래에서 미리 계산해볼 수 있습니다. 재고용 조건은 회사마다 다르고 시간이 '
+                    f'지나며 바뀔 수 있으므로, 결론이 얼마나 안정적인지 미리 확인해두면 좋습니다.</div>',
                     unsafe_allow_html=True)
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         sens_go = st.button(f"조건을 바꿔가며 다시 계산 (5×5 조합 × {N_SCEN}개 시나리오, 약 1분 소요)")
@@ -313,14 +325,22 @@ if "res" in st.session_state:
             fig.update_layout(height=420, plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
                               font=dict(family="Pretendard", color=INK),
                               margin=dict(t=20, b=10))
-            st.markdown(f'<div style="color:{SUB};font-size:.82rem;margin-bottom:4px">'
-                        f'<b>표 읽는 법</b> — 세로(위→아래): 재고용 수락률이 늘어남 · '
+            st.markdown(f'<div style="color:{SUB};font-size:.82rem;margin-bottom:4px;line-height:1.7">'
+                        f'<b>표 읽는 법</b><br>세로(위→아래): 재고용 수락률이 늘어남 · '
                         f'가로(왼쪽→오른쪽): 재고용 임금률이 늘어남</div>', unsafe_allow_html=True)
             st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
             near_note = "" if (near_a == accept and near_w == wage_ratio) else " (가장 가까운 격자점 기준)"
-            st.markdown(f'<span style="color:#5D6B77;font-size:.85rem">색이 짙을수록 지금 추천 후보와 달라지는 '
-                        f'조합입니다(★ = 지금 입력한 값{near_note}). 화면 전체가 한 가지 색에 가까우면, 재고용 '
-                        f'조건이 예상과 달라도 추천 후보는 바뀌지 않는다는 뜻입니다. 그래프 오른쪽 위 아이콘으로 '
+            n_grid = len(sens["grid"])
+            n_flip = len(sens["flip_points"])
+            if n_flip == 0:
+                stability_txt = f"{n_grid}개 조합 전부에서 추천 후보가 바뀌지 않았습니다 — 재고용 조건에 대한 지금 추천은 매우 견고합니다."
+            else:
+                stability_txt = (f"{n_grid}개 조합 중 {n_flip}개에서 추천 후보가 달라집니다 — 재고용 조건이 "
+                                 f"예상과 크게 벗어나면 결론도 함께 바뀔 수 있다는 뜻입니다.")
+            st.markdown(f'<span style="color:#5D6B77;font-size:.85rem;line-height:1.8">색이 짙을수록 지금 추천 '
+                        f'후보와 달라지는 조합입니다(★ = 지금 입력한 값{near_note}).<br>{stability_txt}<br>'
+                        f'화면 전체가 한 가지 색에 가까우면 결론이 안정적이라는 뜻이고, 색이 뒤섞여 있으면 재고용 '
+                        f'조건을 더 정확히 파악하는 것이 중요하다는 뜻입니다. 그래프 오른쪽 위 아이콘으로 '
                         f'확대·원상복구를 할 수 있습니다.</span>',
                         unsafe_allow_html=True)
 
@@ -329,9 +349,10 @@ if "res" in st.session_state:
                 st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
                 st.markdown(f'<div style="font-weight:700;color:{INK};margin-bottom:2px">'
                             f'조건별로 추천 후보가 어떻게 바뀌는지</div>'
-                            f'<div style="color:{SUB};font-size:.85rem;margin-bottom:8px">'
+                            f'<div style="color:{SUB};font-size:.85rem;margin-bottom:8px;line-height:1.7">'
                             f'재고용 수락률·임금률이 아래 범위 안에 있으면, 그때마다 추천 후보는 같은 조합으로 '
-                            f'유지됩니다. 범위를 벗어나면 다른 조합으로 바뀝니다.</div>',
+                            f'유지됩니다.<br>범위를 벗어나면 다른 조합으로 바뀌므로, 표에서 지금 회사 상황과 '
+                            f'가장 가까운 범위를 찾아 추천 후보가 안정적인지 확인해보세요.</div>',
                             unsafe_allow_html=True)
                 # 격자점 나열 대신 후보군 구성이 같은 조합을 묶어 보여준다 —
                 # 거의 같은 행이 12줄 반복되면 읽는 사람이 패턴을 못 본다.
@@ -360,8 +381,9 @@ if "res" in st.session_state:
     with st.container(border=True):
         rc1, rc2 = st.columns([3, 1])
         rc1.markdown(f'<div style="font-weight:700;color:{INK};margin-bottom:2px">해석 리포트</div>'
-                     f'<div style="color:{SUB};font-size:.85rem">위 표·그래프의 결과를 짧은 글로 풀어 '
-                     f'설명합니다. 표에 없는 숫자는 절대 만들어내지 않도록 문장마다 확인을 거칩니다.</div>',
+                     f'<div style="color:{SUB};font-size:.85rem;line-height:1.7">위 표·그래프의 결과를 짧은 '
+                     f'글로 풀어 설명합니다.<br>표에 없는 숫자는 절대 만들어내지 않도록 문장마다 확인을 '
+                     f'거치며, 확인에 실패한 문장은 화면에 표시하지 않습니다.</div>',
                      unsafe_allow_html=True)
         report_go = rc2.button("해석 리포트 생성", width="stretch")
         if report_go:
@@ -404,19 +426,20 @@ if "res" in st.session_state:
 else:
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
     c = st.columns(3)
-    boxes = [(f"{N_SCEN}개 정책 시나리오", "현행 유지부터 2032년 급진 연장, 2041년 완만한 연장까지 "
-                                        "국회 특위·경사노위에서 실제 검토 중인 안을 그대로 반영합니다."),
+    boxes = [(f"{N_SCEN}개 정책 시나리오", f"현행 유지부터 2032년 급진 연장, 2041년 완만한 연장까지"
+                                        f"<br>국회 특위·경사노위에서 실제 검토 중인 {N_SCEN}개 안을 그대로 반영합니다."),
              ("자동 후보 선별", "비용·채용·승진·고령인력, 이 네 가지를 모두 따져서 더 나은 대안이 "
-                            "있는 시나리오는 자동으로 제외합니다. 남은 후보끼리는 무엇을 얻고 "
-                            "무엇을 포기하는지만 비교하면 됩니다."),
+                            "있는 시나리오는 자동으로 제외합니다.<br>남은 후보끼리는 무엇을 얻고 "
+                            "무엇을 포기하는지만 비교하면 되므로, 판단이 훨씬 단순해집니다."),
              ("불확실성 표시", "모든 수치는 하나로 딱 떨어지는 값이 아니라, 계산 과정에서 생길 수 "
-                            "있는 오차를 반영한 범위(90% 구간)로 함께 보여드립니다. 숫자 하나로 "
-                            "단정하기보다는 범위로 판단해보세요.")]
+                            "있는 오차를 반영한 범위(90% 구간)로 함께 보여드립니다.<br>숫자 하나로 "
+                            "단정하기보다는 범위 전체를 보고, 최악의 경우에도 감당할 수 있는지 "
+                            "판단해보세요.")]
     for col, (t, b) in zip(c, boxes):
         col.markdown(f"""<div style="background:{PAPER};border:1px solid {LINE};
         border-radius:14px;padding:20px 22px;min-height:150px">
         <div style="font-weight:700;color:{INK};margin-bottom:8px">{t}</div>
-        <div style="color:{SUB};font-size:.9rem;line-height:1.7">{b}</div></div>""",
+        <div style="color:{SUB};font-size:.9rem;line-height:1.8">{b}</div></div>""",
                      unsafe_allow_html=True)
 
 st.markdown('<div class="footnote">데이터 기반: 한국노동패널조사(KLIPS) 26·27차 · 사업체패널조사(WPS) 2023 · '
