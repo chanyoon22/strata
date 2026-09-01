@@ -2,7 +2,6 @@
 report_generator.py — 경영진 제출용 PDF 리포트
 결정론적 수치 + 해석문(llm_report 산출)을 하나의 문서로 조립.
 """
-from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -13,7 +12,7 @@ from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                 TableStyle, Image, PageBreak)
-from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
@@ -35,7 +34,7 @@ KO_SMALL = ParagraphStyle("kos", fontName="HYSMyeongJo-Medium", fontSize=8, lead
                           textColor=colors.HexColor("#555555"))
 
 
-def _charts(run_output, outdir="."):
+def _charts(run_output, outdir="/home/claude/dss"):
     paths = {}
     res = run_output["results"]
     frontier = set(run_output["frontier"])
@@ -67,10 +66,7 @@ def _charts(run_output, outdir="."):
         ax.annotate(s["scenario"].split(" ")[0], 
                     (s["cost_npv_mean"] / 1e4, s["exp55_person_years_mean"]),
                     fontsize=8, xytext=(5, 5), textcoords="offset points")
-    h = run_output["results"][0]["summary"]["horizon"]
-    ax.set_xlabel(f"{h}년 인건비 NPV (억원)")
-    # "숙련유지"는 과한 표현 — 이 값은 고령인력의 규모이지 숙련도를 측정한 것이 아니다.
-    ax.set_ylabel("55세+ 재직 인년 (고령인력 규모)")
+    ax.set_xlabel("10년 인건비 NPV (억원)"); ax.set_ylabel("55세+ 재직 인년 (숙련유지)")
     ax.set_title("파레토 분석 — 테두리 표시 = 권장 후보군(프론티어)")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -80,9 +76,8 @@ def _charts(run_output, outdir="."):
 
 
 def build_pdf(run_output, sensitivity_output, prose, profile_desc, params_meta,
-              out_path="executive_report.pdf", outdir=None):
-    ch = _charts(run_output, outdir=outdir or str(Path(out_path).parent))
-    h = run_output["results"][0]["summary"]["horizon"]  # "10년" 하드코딩 금지: 실제 horizon 사용(2026-08-28)
+              out_path="/home/claude/dss/executive_report.pdf"):
+    ch = _charts(run_output)
     doc = SimpleDocTemplate(out_path, pagesize=A4,
                             leftMargin=18 * mm, rightMargin=18 * mm,
                             topMargin=16 * mm, bottomMargin=16 * mm)
@@ -98,7 +93,7 @@ def build_pdf(run_output, sensitivity_output, prose, profile_desc, params_meta,
         story.append(Paragraph(line, KO))
     story.append(Spacer(1, 6))
 
-    story.append(Paragraph(f"2. 시나리오 비교 ({h}년 몬테카를로, {run_output['results'][0]['summary']['runs']}회 반복)", KO_H))
+    story.append(Paragraph("2. 시나리오 비교 (10년 몬테카를로, 200회 반복)", KO_H))
     head = ["시나리오", "인건비 NPV(억)", "90% CI", "채용 누계", "승진적체 p90", "55+ 인년"]
     rows = [head]
     for r in run_output["results"]:
@@ -120,7 +115,7 @@ def build_pdf(run_output, sensitivity_output, prose, profile_desc, params_meta,
     story.append(t)
     story.append(Paragraph("● = 파레토 프론티어(어떤 시나리오에도 지배당하지 않는 권장 후보)", KO_SMALL))
 
-    story.append(Paragraph(f"3. {h}년 경로 전망", KO_H))
+    story.append(Paragraph("3. 10년 경로 전망", KO_H))
     story.append(Image(ch["paths"], width=172 * mm, height=47 * mm))
     story.append(Paragraph("4. 파레토 분석", KO_H))
     story.append(Image(ch["pareto"], width=120 * mm, height=78 * mm))
@@ -131,19 +126,12 @@ def build_pdf(run_output, sensitivity_output, prose, profile_desc, params_meta,
         "재고용 수락률·재고용 임금률은 이 분석에서 가장 불확실한 파라미터입니다. "
         "KLIPS 실측 앵커(수락률 하한 0.37=1년내 재취업률, 상한 0.62=전체 재취업률 / "
         "임금비 0.51~0.59) 주변 격자에서 권장 후보군 구성이 달라지는 지점:", KO))
-    # 격자점을 하나씩 나열하면 거의 같은 행이 10줄 반복된다(2026-08-28 개선).
-    # 프론티어 구성이 같은 격자점을 묶어 "어떤 조합에서 어떤 후보군이 나오는가"로 요약한다.
     fp = sensitivity_output["flip_points"]
     if fp:
-        groups = {}
-        for a, w, f in fp:
-            groups.setdefault(tuple(f), []).append((a, w))
-        rows = [["해당 조건의 프론티어", "격자점 수", "수락률 범위", "임금률 범위"]]
-        for f, pts in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:8]:
-            acc = [a for a, _ in pts]; wg = [w for _, w in pts]
-            rows.append([", ".join(x.split(" ")[0] for x in f), str(len(pts)),
-                         f"{min(acc):.2f}~{max(acc):.2f}", f"{min(wg):.2f}~{max(wg):.2f}"])
-        t2 = Table(rows, colWidths=[86 * mm, 18 * mm, 33 * mm, 33 * mm])
+        rows = [["수락률", "임금률", "해당 조건의 프론티어"]]
+        for a, w, f in fp[:10]:
+            rows.append([f"{a:.2f}", f"{w:.2f}", ", ".join(x.split(" ")[0] for x in f)])
+        t2 = Table(rows, colWidths=[20 * mm, 20 * mm, 130 * mm])
         t2.setStyle(TableStyle([
             ("FONTNAME", (0, 0), (-1, -1), "HYGothic-Medium"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
