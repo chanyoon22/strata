@@ -24,8 +24,11 @@ PROMPT_TEMPLATE = """당신은 HR 의사결정 지원 시스템의 해석 담당
    그 외 수치도 JSON 값 그대로 써야 합니다.
 2. 권장 후보군(frontier)은 이미 알고리즘이 확정했습니다. 후보를 추가하거나 빼지 마십시오.
 3. 각 후보 시나리오의 숫자를 하나하나 나열하지 마십시오 — 화면 위쪽 표에 이미 있습니다.
-   대신 (a) 후보들 사이의 전체적인 트레이드오프, (b) 민감도 결과가 시사하는 위험요인,
+   대신 (a) 후보들 사이의 전체적인 트레이드오프, (b) 민감도·견고성 결과가 시사하는 위험요인,
    (c) 경영진이 추가로 확인하면 좋을 점 — 이 세 가지를 요약하는 것이 당신의 역할입니다.
+   현행 대비 변화를 말할 때는 vs_baseline의 값(이미 %·억원·명으로 계산돼 있음)만 쓰십시오.
+   skill_break_even.threshold_pct는 '숙련 공백 1인-년의 가치를 평균 인건비의 몇 %로 볼 때 판단이 바뀌는가'
+   입니다(kind=above: 그 이상이면 현행보다 유리, below: 그 이하일 때만 유리).
 4. 단정적 추천("S3을 선택하라")은 금지. "채용 여력을 우선한다면 ~" 형식의 조건부 서술만 허용.
 5. 전문 용어 없이, 처음 보는 사람도 바로 이해할 수 있는 쉬운 말로 쓰십시오.
 6. 짧게 쓰십시오 — 3~4문장, 200자 내외. 시뮬레이션의 한계는 화면에 별도로 표시되므로
@@ -50,9 +53,50 @@ def _with_display_units(summary: dict) -> dict:
     return out
 
 
-def build_llm_input(run_output, sensitivity_output, limitations):
+def _be(a, b):
+    """숙련 손익분기(평균 인건비 대비 %). LLM이 인용할 수 있게 반올림."""
+    if "skill_value_npv" not in a.get("runs", {}):
+        return None
+    import decision as D
+    x = D.break_even(a, b)
+    return dict(kind=x["kind"], threshold_pct=None if x["x"] is None else round(x["x"] * 100, 0))
+
+
+def _vs_baseline(run_output):
+    """기준 시나리오(목록의 첫 번째) 대비 변화. 문장에 그대로 인용할 수 있게 미리 반올림한다."""
+    res = run_output["results"]
+    b = res[0]["summary"]
+    out = []
+    for r in res[1:]:
+        s = r["summary"]
+        out.append(dict(
+            scenario=s["scenario"],
+            cost_change_pct=round((s["cost_npv_mean"] / b["cost_npv_mean"] - 1) * 100, 2),
+            cost_change_eok=round((s["cost_npv_mean"] - b["cost_npv_mean"]) / 1e4, 0),
+            hires_change_pct=round((s["total_hires_mean"] / max(b["total_hires_mean"], 1e-9) - 1) * 100, 1),
+            hires_change_n=round(s["total_hires_mean"] - b["total_hires_mean"], 0),
+            promo_wait_change_years=round(s["promo_congestion_mean"] - b["promo_congestion_mean"], 1),
+            income_gap_change_pct=(round((s["income_gap_mean"] / b["income_gap_mean"] - 1) * 100, 0)
+                                   if b.get("income_gap_mean", 0) > 0 else None),
+            skill_gap_change_pct=(round((s["skill_gap_mean"] / b["skill_gap_mean"] - 1) * 100, 0)
+                                  if b.get("skill_gap_mean", 0) > 0 else None),
+            skill_break_even=_be(r, res[0])))
+    return out
+
+
+def build_llm_input(run_output, sensitivity_output, limitations, robustness_output=None):
     """엔진 산출 → LLM 입력 JSON. 이 함수 밖의 데이터는 LLM에 전달되지 않는다."""
+    extra = {}
+    if robustness_output:
+        extra["robustness"] = dict(
+            n_states=robustness_output["n_states"],
+            frontier_count_by_scenario={n: int(round(v * robustness_output["n_states"]))
+                                        for n, v in robustness_output["frontier_share"].items()})
     return dict(
+        baseline=run_output["results"][0]["summary"]["scenario"],
+        horizon_years=run_output["results"][0]["summary"]["horizon"],
+        vs_baseline=_vs_baseline(run_output),
+        **extra,
         scenarios=[_with_display_units(r["summary"]) for r in run_output["results"]],
         frontier=run_output["frontier"],
         dominated=run_output["dominated"],
@@ -66,7 +110,8 @@ def build_llm_input(run_output, sensitivity_output, limitations):
         dominated_count=len(run_output["dominated"]),
         total_count=len(run_output["frontier"]) + len(run_output["dominated"]),
         sensitivity=dict(baseline_frontier=sensitivity_output["baseline_frontier"],
-                         flip_points=sensitivity_output["flip_points"][:8]),
+                         flip_points=sensitivity_output["flip_points"][:8],
+                         checked=bool(sensitivity_output.get("grid", sensitivity_output.get("checked", False)))),
         limitations=limitations,
     )
 
@@ -110,6 +155,9 @@ def validate_prose(prose: str, payload: dict, tol=0.5):
                 collect(v)
         elif isinstance(x, (int, float)):
             allowed.add(round(float(x), 2))
+            # 음수 변화율은 문장에서 "13.9% 줄어든다"처럼 부호 없이 쓰인다. 정규식도 부호를
+            # 떼고 읽으므로 절대값을 함께 허용해야 정당한 문장이 삭제되지 않는다(v3 추가).
+            allowed.add(round(abs(float(x)), 2))
         elif isinstance(x, str):
             for m in _NUM.findall(x):          # "S2 단계적연장(2036년 65세)" → 2036, 65
                 allowed.add(round(float(m.replace(",", "")), 2))
@@ -149,8 +197,13 @@ def validate_prose(prose: str, payload: dict, tol=0.5):
     return "\n".join(kept_lines), dropped
 
 
+# 모델 ID는 시간이 지나면 폐기된다. 환경변수 STRATA_LLM_MODEL로 바꿀 수 있고, 지정한 모델이
+# 없으면 아래 목록을 차례로 시도한다(2026-11 기준 최신 Sonnet/Haiku → 이전 세대).
+DEFAULT_MODELS = ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-4-5-20250929"]
+
+
 def call_llm_api(payload: dict, api_key: str | None = None,
-                  model: str = "claude-sonnet-4-5-20250929") -> tuple[str, str]:
+                  model: str | None = None) -> tuple[str, str]:
     """Anthropic API로 해석문 생성. 실패하거나 키가 없으면 (오프라인 렌더러 결과, 사유)를 반환.
     반환값과 무관하게 이 함수를 거친 산문은 항상 validate_prose를 다시 통과해야 한다 —
     API 응답이라고 수치 창조 위험이 사라지는 게 아니다(이 프로젝트의 핵심 원칙)."""
@@ -161,17 +214,24 @@ def call_llm_api(payload: dict, api_key: str | None = None,
         import anthropic
     except ImportError:
         return render_offline(payload), "offline_sdk_missing"
-    try:
-        client = anthropic.Anthropic(api_key=key)
-        resp = client.messages.create(
-            model=model, max_tokens=800,
-            messages=[{"role": "user", "content": build_prompt(payload)}])
-        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-        if not text.strip():
-            return render_offline(payload), "offline_empty_response"
-        return text.strip(), "api"
-    except Exception as e:  # 네트워크/키/레이트리밋 등 — 조용히 실패하지 않고 사유를 남긴 채 폴백
-        return render_offline(payload), f"offline_api_error:{type(e).__name__}"
+    models = [m for m in [model, os.environ.get("STRATA_LLM_MODEL")] if m] + DEFAULT_MODELS
+    last = "unknown"
+    client = anthropic.Anthropic(api_key=key)
+    for m in dict.fromkeys(models):                    # 중복 제거, 순서 유지
+        try:
+            resp = client.messages.create(
+                model=m, max_tokens=800,
+                messages=[{"role": "user", "content": build_prompt(payload)}])
+            text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+            if not text.strip():
+                return render_offline(payload), "offline_empty_response"
+            return text.strip(), "api"
+        except getattr(anthropic, "NotFoundError", ()):   # 모델 ID 폐기 → 다음 후보
+            last = "NotFoundError"
+            continue
+        except Exception as e:  # 네트워크/키/레이트리밋 등 — 조용히 실패하지 않고 사유를 남긴 채 폴백
+            return render_offline(payload), f"offline_api_error:{type(e).__name__}"
+    return render_offline(payload), f"offline_api_error:{last}"
 
 
 def generate_report(payload: dict, api_key: str | None = None) -> dict:
@@ -193,36 +253,59 @@ def generate_report(payload: dict, api_key: str | None = None) -> dict:
 def render_offline(payload: dict) -> str:
     """API 없이도 동작하는 결정론적 해석문(템플릿). LLM 사용 시엔 이 문장을 대체.
 
-    2026-09-01 수정: 예전 버전은 후보 시나리오마다 NPV·채용·인년 숫자를 한 줄씩 나열해,
-    화면 위쪽 표와 똑같은 내용을 산문으로 한 번 더 반복하고 있었다(비전문가가 읽기엔
-    사실상 표를 두 번 읽는 것과 같음). 이제는 표를 대체하지 않고 "표를 어떻게 읽으면
-    되는지"만 짧고 쉬운 말로 짚어준다 — 숫자는 후보 이름 비교에만 쓰고 직접 인용하지 않는다."""
+    표를 다시 읽어주지 않는다. (1) 몇 개가 남았는지 (2) 후보들 사이에서 무엇을 주고 무엇을
+    받는지 (3) 결론이 얼마나 단단한지 — 이 세 가지만 말한다. 인용하는 숫자는 모두 payload에
+    미리 계산돼 들어 있는 값이라 사후 검증을 그대로 통과한다."""
     s = {x["scenario"]: x for x in payload["scenarios"]}
     fr = payload["frontier"]
     fr_n, dom_n = payload["frontier_count"], payload["dominated_count"]
+    vs = {x["scenario"]: x for x in payload.get("vs_baseline", [])}
 
     def short(name):
         return name.split(" ")[0]
 
-    lines = [f"{fr_n + dom_n}개 안 가운데 {fr_n}개가 후보로 남았고, {dom_n}개는 다른 안보다 나은 점이 "
-             f"하나도 없어 탈락했습니다."]
+    lines = [f"{payload['total_count']}개 안 가운데 {fr_n}개가 후보로 남았고, {dom_n}개는 다른 안보다 나은 점이 "
+             f"없어 제외했습니다." if dom_n else
+             f"{payload['total_count']}개 안이 모두 후보로 남았습니다. 어느 하나가 모든 면에서 낫다고 할 수 없습니다."]
 
-    if fr:
+    cand = [n for n in fr if n in vs]
+    if cand:
         cheapest = min(fr, key=lambda n: s[n]["cost_npv_mean"])
-        most_e55 = max(fr, key=lambda n: s[n]["exp55_person_years_mean"])
-        if cheapest == most_e55:
-            lines.append(f"후보 중에서는 {short(cheapest)}이 비용과 고령인력 유지 두 측면 모두에서 "
-                        f"무난한 편입니다.")
+        most_hire = max(cand, key=lambda n: vs[n]["hires_change_pct"])
+        least_hire = min(cand, key=lambda n: vs[n]["hires_change_pct"])
+        if vs[least_hire]["hires_change_pct"] < 0 and most_hire != least_hire:
+            pick = (f"채용 여력과 인건비 두 측면 모두 {short(cheapest)} 쪽이 유리합니다."
+                    if most_hire == cheapest else
+                    f"채용 여력을 우선한다면 {short(most_hire)}, 인건비를 우선한다면 {short(cheapest)} 쪽이 유리합니다.")
+            lines.append(f"현행을 바꾸는 후보들은 신규채용이 {abs(vs[most_hire]['hires_change_pct'])}%에서 "
+                         f"{abs(vs[least_hire]['hires_change_pct'])}%까지 줄어듭니다. " + pick)
         else:
-            lines.append(f"후보 중 비용을 가장 아끼려면 {short(cheapest)}, 55세 이상 인력을 가장 "
-                        f"많이 유지하려면 {short(most_e55)}이 유리합니다.")
+            lines.append(f"후보 가운데 인건비를 우선한다면 {short(cheapest)} 쪽이 유리합니다.")
+        gaps = [n for n in cand if vs[n].get("income_gap_change_pct") is not None]
+        if gaps:
+            best_gap = min(gaps, key=lambda n: vs[n]["income_gap_change_pct"])
+            if vs[best_gap]["income_gap_change_pct"] < 0:
+                lines.append(f"퇴직자의 소득 공백을 가장 많이 줄이는 것은 {short(best_gap)}로, 현행보다 "
+                             f"{abs(vs[best_gap]['income_gap_change_pct']):.0f}% 적습니다.")
+        above = [n for n in cand if (vs[n].get("skill_break_even") or {}).get("kind") == "above"
+                 and vs[n]["skill_break_even"].get("threshold_pct") is not None]
+        if above:
+            lo = min(above, key=lambda n: vs[n]["skill_break_even"]["threshold_pct"])
+            lines.append(f"숙련 손실까지 보면, 숙련 공백 1인-년의 가치를 평균 인건비의 "
+                         f"{vs[lo]['skill_break_even']['threshold_pct']:.0f}% 이상으로 보는 회사에서는 "
+                         f"{short(lo)} 쪽이 현행보다 총손실이 적습니다.")
 
+    rb = payload.get("robustness")
+    if rb:
+        full = [n for n, c in rb["frontier_count_by_scenario"].items() if c == rb["n_states"]]
+        if full:
+            lines.append(f"임금·퇴사율·채용 방식 가정을 바꾼 {rb['n_states']}가지 상황 모두에서 후보로 남은 것은 "
+                         f"{', '.join(short(n) for n in full)}입니다.")
     if payload["sensitivity"]["flip_points"]:
-        lines.append("다만 재고용 조건이 달라지면 이 결과도 바뀔 수 있으니, 민감도 분석 탭에서 "
-                     "함께 확인해보세요.")
-    else:
+        lines.append("다만 재고용 조건이 달라지면 후보가 바뀔 수 있으니, 실제 수락률을 먼저 확인해 보세요.")
+    elif payload["sensitivity"].get("checked", True):
         lines.append("재고용 조건을 바꿔봐도 이 결과는 잘 흔들리지 않았습니다.")
 
     # 한계 문구는 여기서 이어붙이지 않는다 — 저자 텍스트이므로 검증을 거치지 않고
-    # 소비자(PDF 6장·UI 한계 섹션)가 원문 그대로 렌더한다. generate_report()의 주석 참조.
+    # 소비자(PDF·UI 한계 섹션)가 원문 그대로 렌더한다. generate_report()의 주석 참조.
     return " ".join(lines)
